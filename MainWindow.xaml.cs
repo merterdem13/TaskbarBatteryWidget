@@ -77,6 +77,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _pollTimer;
     private readonly DispatcherTimer _taskbarSyncTimer;
     private readonly System.Windows.Forms.NotifyIcon _trayIcon;
+    private readonly System.Windows.Forms.ToolStripMenuItem _lockTrayItem;
+    private readonly System.Windows.Forms.ToolStripMenuItem _autoStartTrayItem;
     private bool _isPolling;
     private bool _customPositionLoaded;
     private bool _isPositionLocked = true;
@@ -125,23 +127,29 @@ public partial class MainWindow : Window
         };
         var trayMenu = new System.Windows.Forms.ContextMenuStrip();
         trayMenu.Items.Add("Şimdi Yenile", null, (_, _) => _ = RefreshDevicesAsync());
-        var lockTrayItem = new System.Windows.Forms.ToolStripMenuItem("Konumu Sabitle (Kilitli)")
+        _lockTrayItem = new System.Windows.Forms.ToolStripMenuItem("Konumu Sabitle")
         {
             Checked = true,
             CheckOnClick = true
         };
-        lockTrayItem.CheckedChanged += (_, _) =>
-        {
-            _isPositionLocked = lockTrayItem.Checked;
-            LockPositionMenuItem.IsChecked = _isPositionLocked;
-        };
-        trayMenu.Items.Add(lockTrayItem);
+        _lockTrayItem.CheckedChanged += (_, _) => SetPositionLocked(_lockTrayItem.Checked);
+        trayMenu.Items.Add(_lockTrayItem);
         trayMenu.Items.Add("Konumu Sıfırla (Sol Alt)", null, (_, _) => ResetToDefaultPosition());
+        trayMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        _autoStartTrayItem = new System.Windows.Forms.ToolStripMenuItem("Windows ile Başlat")
+        {
+            CheckOnClick = true
+        };
+        _autoStartTrayItem.Click += (_, _) =>
+        {
+            SetAutoStart(_autoStartTrayItem.Checked);
+            UpdateAutoStartMenuState();
+        };
+        trayMenu.Items.Add(_autoStartTrayItem);
         trayMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
         trayMenu.Items.Add("Çıkış", null, (_, _) => ExitApp());
         _trayIcon.ContextMenuStrip = trayMenu;
 
-        EnsureAutoStartEnabledFirstRun();
         UpdateAutoStartMenuState();
 
         Loaded += MainWindow_Loaded;
@@ -166,7 +174,8 @@ public partial class MainWindow : Window
         SetWindowLong(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
 
         AttachToTaskbar(hwnd);
-        ResetToDefaultPosition(); // Dock cleanly onto the taskbar left side
+        if (!TryLoadCustomPosition())
+            SnapToTaskbarLeft();
 
         await RefreshDevicesAsync();
         _pollTimer.Start();
@@ -195,7 +204,10 @@ public partial class MainWindow : Window
             if (File.Exists(ConfigPath))
                 File.Delete(ConfigPath);
         }
-        catch { }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("Pencere veya ayar işlemi", exception);
+        }
     }
 
     private void SnapToTaskbarLeft()
@@ -231,16 +243,64 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool TryLoadCustomPosition()
+    {
+        try
+        {
+            if (!File.Exists(ConfigPath) ||
+                !WindowPosition.TryParse(File.ReadAllText(ConfigPath), out var position))
+                return false;
+
+            Left = position.Left;
+            Top = position.Top;
+            _customPositionLoaded = true;
+            EnsureCustomPositionVisible();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _customPositionLoaded = false;
+            DiagnosticLog.Write("Kayıtlı konumu yükleme", exception);
+            return false;
+        }
+    }
+
+    private void EnsureCustomPositionVisible()
+    {
+        if (!_customPositionLoaded) return;
+
+        // WPF coordinates are DIPs; screen bounds and the native window rect are pixels.
+        var source = PresentationSource.FromVisual(this);
+        double dpiX = source?.CompositionTarget?.TransformToDevice.M11 ?? 1.0;
+        double dpiY = source?.CompositionTarget?.TransformToDevice.M22 ?? 1.0;
+        double width = Math.Max(32, ActualWidth);
+        double height = Math.Max(24, ActualHeight);
+        var widgetBounds = new Rect(Left * dpiX, Top * dpiY, width * dpiX, height * dpiY);
+        bool visible = System.Windows.Forms.Screen.AllScreens.Any(screen =>
+        {
+            var bounds = screen.Bounds;
+            return new Rect(bounds.X, bounds.Y, bounds.Width, bounds.Height).Contains(widgetBounds);
+        });
+        if (!visible)
+        {
+            _customPositionLoaded = false;
+            SnapToTaskbarLeft();
+        }
+    }
+
     private void SaveCustomPosition()
     {
         try
         {
             string? dir = Path.GetDirectoryName(ConfigPath);
             if (dir != null) Directory.CreateDirectory(dir);
-            File.WriteAllText(ConfigPath, $"{Left},{Top}");
+            File.WriteAllText(ConfigPath, new WindowPosition(Left, Top).Serialize());
             _customPositionLoaded = true;
         }
-        catch { }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("Konumu kaydetme", exception);
+        }
     }
 
     private async Task RefreshDevicesAsync()
@@ -262,7 +322,7 @@ public partial class MainWindow : Window
             }
 
             _hasActiveDevices = true;
-            string currentSig = string.Join("|", devices.Select(d => $"{d.Id}:{d.BatteryPercent}:{d.IsCharging}"));
+            string currentSig = string.Join("|", devices.Select(d => $"{d.Id}:{d.Name}:{d.Type}:{d.BatteryPercent}:{d.IsCharging}:{d.StatusText}"));
             if (currentSig != _lastStateSignature)
             {
                 _lastStateSignature = currentSig;
@@ -297,10 +357,14 @@ public partial class MainWindow : Window
 
             if (!_customPositionLoaded)
             {
-                Dispatcher.BeginInvoke(new Action(SnapToTaskbarLeft), DispatcherPriority.Loaded);
+                await Dispatcher.InvokeAsync(SnapToTaskbarLeft, DispatcherPriority.Loaded);
             }
 
             TrimWorkingSet();
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("Cihaz listesini yenileme", exception);
         }
         finally
         {
@@ -399,6 +463,7 @@ public partial class MainWindow : Window
         if (MainBorder.Visibility != Visibility.Visible)
             MainBorder.Visibility = Visibility.Visible;
 
+        EnsureCustomPositionVisible();
         if (!_customPositionLoaded)
         {
             SnapToTaskbarLeft();
@@ -419,7 +484,14 @@ public partial class MainWindow : Window
 
     private void LockPositionMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        _isPositionLocked = LockPositionMenuItem.IsChecked;
+        SetPositionLocked(LockPositionMenuItem.IsChecked);
+    }
+
+    private void SetPositionLocked(bool locked)
+    {
+        _isPositionLocked = locked;
+        LockPositionMenuItem.IsChecked = locked;
+        _lockTrayItem.Checked = locked;
     }
 
     private async void RefreshMenuItem_Click(object sender, RoutedEventArgs e)
@@ -432,34 +504,19 @@ public partial class MainWindow : Window
         ResetToDefaultPosition();
     }
 
-    private void EnsureAutoStartEnabledFirstRun()
-    {
-        try
-        {
-            string flagFile = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "TaskbarBatteryWidget",
-                "autostart_initialized.txt");
-
-            if (!File.Exists(flagFile))
-            {
-                SetAutoStart(true);
-                string? dir = Path.GetDirectoryName(flagFile);
-                if (dir != null) Directory.CreateDirectory(dir);
-                File.WriteAllText(flagFile, "1");
-            }
-        }
-        catch { }
-    }
-
     private void UpdateAutoStartMenuState()
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RegistryRunKey, false);
-            AutoStartMenuItem.IsChecked = key?.GetValue(AppRegistryName) != null;
+            bool enabled = key?.GetValue(AppRegistryName) != null;
+            AutoStartMenuItem.IsChecked = enabled;
+            _autoStartTrayItem.Checked = enabled;
         }
-        catch { }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("Pencere veya ayar işlemi", exception);
+        }
     }
 
     private void AutoStartMenuItem_Click(object sender, RoutedEventArgs e)
@@ -472,7 +529,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RegistryRunKey, true);
+            using var key = Registry.CurrentUser.CreateSubKey(RegistryRunKey, true);
             if (key == null) return;
 
             if (enable)
@@ -488,7 +545,10 @@ public partial class MainWindow : Window
                 key.DeleteValue(AppRegistryName, false);
             }
         }
-        catch { }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("Pencere veya ayar işlemi", exception);
+        }
     }
 
     private void ExitMenuItem_Click(object sender, RoutedEventArgs e)
@@ -504,7 +564,10 @@ public partial class MainWindow : Window
             using var proc = System.Diagnostics.Process.GetCurrentProcess();
             SetProcessWorkingSetSize(proc.Handle, new IntPtr(-1), new IntPtr(-1));
         }
-        catch { }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("Pencere veya ayar işlemi", exception);
+        }
     }
 
     private void ExitApp()
