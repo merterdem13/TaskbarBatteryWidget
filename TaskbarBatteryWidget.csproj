@@ -15,6 +15,7 @@
   <ItemGroup>
     <Compile Remove="Tests/**/*.cs" />
     <PackageReference Include="HidSharp" Version="2.6.4" />
+    <PackageReference Include="Netimobiledevice" Version="1.0.0" />
   </ItemGroup>
 
 </Project>

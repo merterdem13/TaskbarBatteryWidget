@@ -68,6 +68,12 @@ try
     {
         new() { Name = "AirPods Pro", BatteryPercent = 70, AirPodsPart = AirPodsPart.None }
     }).Count == 1, "Parça bilgisi yoksa genel AirPods kaydı korunur");
+    Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("iPhone Mert") == DeviceType.Phone,
+        "Bluetooth iPhone telefon olarak sınıflandırılır");
+    Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("Galaxy S24") == DeviceType.Phone,
+        "Bluetooth Android telefon olarak sınıflandırılır");
+    Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("Pixel Buds Pro") == DeviceType.Earbuds,
+        "Bluetooth kulaklık adı telefondan önce kulaklık olarak sınıflandırılır");
 
     const int productId = 1234;
     DateTime now = DateTime.Now;
