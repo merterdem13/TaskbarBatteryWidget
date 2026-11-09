@@ -8,7 +8,7 @@ Windows 10/11 görev çubuğunda Razer, SteelSeries ve Windows'un pil bilgisi su
   - **Razer (`VID_1532`):** Razer Synapse kapalı olsa bile doğrudan USB Dongle üzerinden pil yüzdesini (`0x80`) ve şarj durumunu (`0x84`) okur (Synapse 4 log yedeklemeli).
   - **SteelSeries (`VID_1038`):** Arctis 7+, 7P+, 7X+, Nova 5, Nova 7 ve eski Arctis 7/Pro serilerinin pil ve açık/kapalı/şarj durumunu doğrudan USB HID üzerinden okur.
 - **Bluetooth & AirPods Desteği:** Windows SetupAPI (`DEVPKEY_Bluetooth_Battery`) üzerinden bağlı Bluetooth kulaklık, fare ve oyun kollarının pil yüzdesini gösterir.
-- **iPhone / iPad USB Algılama:** Telefon kablo ile bilgisayara takıldığında **USB ile bağlı** gösterilir. Gerçek pil yüzdesi veya şarj durumu okunmaz.
+- **iPhone / iPad USB Algılama:** Telefon kablo ile bilgisayara takıldığında **USB ile bağlı** gösterilir. Apple Devices veya iTunes ve Apple Mobile Device Service erişilebiliyorsa pil yüzdesi ve şarj durumu da okunur; şarj durumu yüzde yanında ⚡ ile gösterilir.
 - **Görev Çubuğuna Sabit (Docked) & Tam Ekran Duyarlı:**
   - `Shell_TrayWnd` üzerine kenetlenir, `Win + D` yapıldığında kaybolmaz.
   - Tam ekran oyun veya video açıldığında otomatik gizlenir.
@@ -30,6 +30,8 @@ Yenileme, konum kilidi, konum sıfırlama ve Windows başlangıç tercihi hem wi
 - Razer log yedeği yalnızca aynı ürün kimliğine ait, son 30 dakika içinde güncellenmiş dosyalardan okunur. Dosya güncelliği, pil kaydının kendi güncelliğini tek başına kanıtlamaz.
 - SteelSeries modellerinin protokolü ve pil ölçeği donanım üzerinde ayrıca doğrulanmalıdır. Bu düzeltme mevcut HID protokollerini değiştirmez. HID yanıtındaki sıfırın pil/çevrimdışı anlamı cihaz bazında doğrulanmadığından Razer/eski SteelSeries yolları korunmuştur; Bluetooth ve logdan okunan geçerli `%0` değerleri gösterilir.
 - Bluetooth pil ve bağlantı bilgisi Windows'un sunduğu özelliklere bağlıdır. Bağlantı özelliği bulunamayan aygıtlarda bağlantısız cihazları gizleme garantisi yoktur. AirPods sol/sağ kulaklık ve kutu yüzdeleri ayrı okunmaz.
+- Bluetooth adı iPhone/iPad/Android telefon desenleriyle eşleşirse cihaz telefon ikonu ile gösterilir; üretici tarafından özel adlandırılmış telefonlar kulaklık olarak kalabilir.
+- USB iPhone pil bilgisi için cihazın güvenilmiş olması ve Apple Devices/iTunes'un Apple Mobile Device Service bileşeninin kullanılabilir olması gerekir. Bu bileşen yoksa uygulama yalnızca **USB ile bağlı** durumunu gösterir.
 - Cihazlar PID/ad üzerinden tekilleştirildiği için aynı modelden birden fazla fiziksel cihazın ayrıştırılması henüz garanti edilmez.
 - Tam ekran tespiti birincil ekranı kullanır. Çoklu monitör ve farklı DPI senaryoları ayrıca test edilmelidir.
 - Bilgisayarın kendi bataryasını izleme veya şarj sınırı uygulama özelliği yoktur.

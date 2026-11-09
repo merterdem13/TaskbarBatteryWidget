@@ -410,7 +410,7 @@ public static class BatteryMonitorService
                     Name = info.Value.Name,
                     Type = DeviceType.Phone,
                     BatteryPercent = info.Value.BatteryPercent,
-                    IsCharging = false,
+                    IsCharging = info.Value.IsCharging,
                     ConnectionText = "USB ile bağlı"
                 };
             }

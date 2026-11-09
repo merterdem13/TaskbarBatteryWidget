@@ -39,6 +39,12 @@ try
         "Sondaki Stereo soneki temizlenir");
     Check(NativeBluetoothBatteryReader.CleanDeviceName("Xbox Wireless Stereo Headset") == "Xbox Wireless Stereo Headset",
         "Cihaz adının ortasındaki Stereo kelimesi bozulmaz");
+    Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("iPhone Mert") == DeviceType.Phone,
+        "Bluetooth iPhone telefon olarak sınıflandırılır");
+    Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("Galaxy S24") == DeviceType.Phone,
+        "Bluetooth Android telefon olarak sınıflandırılır");
+    Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("Pixel Buds Pro") == DeviceType.Earbuds,
+        "Bluetooth kulaklık adı telefondan önce kulaklık olarak sınıflandırılır");
 
     const int productId = 1234;
     DateTime now = DateTime.Now;
