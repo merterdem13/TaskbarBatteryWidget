@@ -261,6 +261,74 @@ public static class NativeBluetoothBatteryReader
         return DeviceType.Headset;
     }
 
+    public static (string Name, int? BatteryPercent)? GetConnectedAndroidPhoneInfo()
+    {
+        // Common Android Vendor IDs:
+        // Samsung (04E8), Xiaomi/Redmi (2717), Google Pixel (18D1), Huawei/Honor (12D1), OnePlus/Oppo (22D9), Vivo (2D95), LG (1004), Motorola (22B8)
+        string[] androidVids = new[] { "VID_04E8", "VID_2717", "VID_18D1", "VID_12D1", "VID_22D9", "VID_2D95", "VID_1004", "VID_22B8" };
+
+        foreach (string enumClass in new[] { "WPD", "USB" })
+        {
+            IntPtr hDevInfo = SetupDiGetClassDevs(IntPtr.Zero, enumClass, IntPtr.Zero, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+            if (hDevInfo == IntPtr.Zero || hDevInfo == new IntPtr(-1))
+                continue;
+
+            try
+            {
+                uint index = 0;
+                SP_DEVINFO_DATA devData = new() { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
+
+                while (SetupDiEnumDeviceInfo(hDevInfo, index++, ref devData))
+                {
+                    string? instanceId = GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_InstanceId);
+                    if (string.IsNullOrEmpty(instanceId))
+                        continue;
+
+                    // Apple cihazlarını atla (onlar GetConnectedIPhoneInfo ile yakalanıyor)
+                    if (instanceId.Contains("VID_05AC", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string? name = GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_FriendlyName)
+                                ?? GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_DeviceDesc);
+
+                    bool isAndroidVid = false;
+                    foreach (var vid in androidVids)
+                    {
+                        if (instanceId.Contains(vid, StringComparison.OrdinalIgnoreCase))
+                        {
+                            isAndroidVid = true;
+                            break;
+                        }
+                    }
+
+                    bool hasAndroidKeywords = !string.IsNullOrEmpty(name) && (
+                        name.Contains("Galaxy", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Xiaomi", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Redmi", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Pixel", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("OnePlus", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Android", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Huawei", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("POCO", StringComparison.OrdinalIgnoreCase)
+                    );
+
+                    if (isAndroidVid || (enumClass == "WPD" && hasAndroidKeywords))
+                    {
+                        string displayName = !string.IsNullOrWhiteSpace(name) ? name.Trim() : "Android Telefon";
+                        byte? batt = GetByteProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Battery);
+                        return (displayName, batt.HasValue && batt.Value <= 100 ? (int)batt.Value : null);
+                    }
+                }
+            }
+            finally
+            {
+                SetupDiDestroyDeviceInfoList(hDevInfo);
+            }
+        }
+
+        return null;
+    }
+
     public static (string Name, int? BatteryPercent)? GetConnectedIPhoneInfo()
     {
         IntPtr hDevInfo = SetupDiGetClassDevs(IntPtr.Zero, "USB", IntPtr.Zero, DIGCF_PRESENT | DIGCF_ALLCLASSES);

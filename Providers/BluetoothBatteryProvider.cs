@@ -47,6 +47,19 @@ public class BluetoothBatteryProvider : IBatteryProvider
                     IsCharging = true
                 });
             }
+
+            var android = NativeBluetoothBatteryReader.GetConnectedAndroidPhoneInfo();
+            if (android != null)
+            {
+                list.Add(new BatteryDeviceInfo
+                {
+                    Id = "android_usb",
+                    Name = android.Value.Name,
+                    Type = DeviceType.Phone,
+                    BatteryPercent = android.Value.BatteryPercent,
+                    IsCharging = true
+                });
+            }
         }
         catch { }
 
