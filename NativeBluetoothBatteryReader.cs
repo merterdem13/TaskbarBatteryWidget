@@ -9,6 +9,7 @@ public static class NativeBluetoothBatteryReader
 {
     private const int DIGCF_PRESENT = 0x00000002;
     private const int DIGCF_ALLCLASSES = 0x00000004;
+    private const int CR_SUCCESS = 0x00000000;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SP_DEVINFO_DATA
@@ -88,6 +89,21 @@ public static class NativeBluetoothBatteryReader
     [DllImport("setupapi.dll", SetLastError = true)]
     private static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
+    [DllImport("cfgmgr32.dll", SetLastError = false)]
+    private static extern int CM_Get_Parent(
+        out uint pdnDevInst,
+        uint dnDevInst,
+        uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", SetLastError = false, CharSet = CharSet.Unicode)]
+    private static extern int CM_Get_DevNode_PropertyW(
+        uint dnDevInst,
+        ref DEVPROPKEY PropertyKey,
+        out uint PropertyType,
+        byte[]? PropertyBuffer,
+        ref uint PropertyBufferSize,
+        uint ulFlags);
+
     public static List<(string Name, int BatteryPercent, DeviceType Type)> GetConnectedBluetoothBatteries()
     {
         var results = new List<(string Name, int BatteryPercent, DeviceType Type)>();
@@ -109,12 +125,13 @@ public static class NativeBluetoothBatteryReader
                     index++;
 
                     byte? batt = GetByteProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Battery);
-                    if (batt == null || batt.Value > 100)
+                    if (batt == null || batt.Value == 0 || batt.Value > 100)
                         continue;
 
-                    // Check if actively connected (if property exists and is false, skip)
-                    bool? isConnected = GetBoolProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Connected);
-                    if (isConnected.HasValue && !isConnected.Value)
+                    // Verify active connection on this node or its parent Bluetooth device node.
+                    // Child HID/GATT nodes often omit DEVPKEY_Bluetooth_Connected while their parent
+                    // BTHLE/BTHENUM node explicitly reports false when turned off or disconnected.
+                    if (!IsBluetoothDeviceActivelyConnected(hDevInfo, ref devData))
                         continue;
 
                     string? name = GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_FriendlyName)
@@ -123,10 +140,9 @@ public static class NativeBluetoothBatteryReader
                     if (string.IsNullOrWhiteSpace(name))
                         continue;
 
-                    // Clean up Hands-Free / Avrcp suffixes
-                    name = name.Replace("Hands-Free AG Audio", "", StringComparison.OrdinalIgnoreCase)
-                               .Replace("Stereo", "", StringComparison.OrdinalIgnoreCase)
-                               .Trim();
+                    name = CleanDeviceName(name);
+                    if (string.IsNullOrWhiteSpace(name))
+                        continue;
 
                     DeviceType type = GuessGenericDeviceType(name);
 
@@ -146,6 +162,39 @@ public static class NativeBluetoothBatteryReader
         return results;
     }
 
+    private static bool IsBluetoothDeviceActivelyConnected(IntPtr hDevInfo, ref SP_DEVINFO_DATA devData)
+    {
+        bool? directConnected = GetBoolProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Connected);
+        if (directConnected.HasValue)
+            return directConnected.Value;
+
+        // Walk up the parent device tree (e.g. HID -> BTHLEDevice -> BTHLE\Dev_xxx)
+        uint currentInst = devData.DevInst;
+        for (int depth = 0; depth < 6; depth++)
+        {
+            if (CM_Get_Parent(out uint parentInst, currentInst, 0) != CR_SUCCESS || parentInst == 0)
+                break;
+
+            bool? parentConnected = GetDevInstBoolProperty(parentInst, DEVPKEY_Bluetooth_Connected);
+            if (parentConnected.HasValue)
+                return parentConnected.Value;
+
+            currentInst = parentInst;
+        }
+
+        // If neither the node nor any ancestor exposes DEVPKEY_Bluetooth_Connected,
+        // do not assume an unverified cached HID/BLE node is actively connected.
+        return false;
+    }
+
+    internal static string CleanDeviceName(string name)
+    {
+        string cleaned = name.Replace("Hands-Free AG Audio", "", StringComparison.OrdinalIgnoreCase).Trim();
+        if (cleaned.EndsWith(" Stereo", StringComparison.OrdinalIgnoreCase))
+            cleaned = cleaned[..^" Stereo".Length].Trim();
+        return cleaned;
+    }
+
     private static DeviceType GuessGenericDeviceType(string name)
     {
         if (name.Contains("Mouse", StringComparison.OrdinalIgnoreCase) ||
@@ -153,6 +202,9 @@ public static class NativeBluetoothBatteryReader
             name.Contains("Viper", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("DeathAdder", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Basilisk", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Naga", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Orochi", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Cobra", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Superlight", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("G Pro", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("DA V2", StringComparison.OrdinalIgnoreCase))
@@ -162,7 +214,8 @@ public static class NativeBluetoothBatteryReader
 
         if (name.Contains("AirPods", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Buds", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("Earbuds", StringComparison.OrdinalIgnoreCase))
+            name.Contains("Earbuds", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Hammerhead", StringComparison.OrdinalIgnoreCase))
         {
             return DeviceType.Earbuds;
         }
@@ -231,6 +284,17 @@ public static class NativeBluetoothBatteryReader
         {
             if (reqSize >= 1)
                 return buf[0] != 0;
+        }
+        return null;
+    }
+
+    private static bool? GetDevInstBoolProperty(uint devInst, DEVPROPKEY key)
+    {
+        byte[] buf = new byte[4];
+        uint size = (uint)buf.Length;
+        if (CM_Get_DevNode_PropertyW(devInst, ref key, out _, buf, ref size, 0) == CR_SUCCESS && size >= 1)
+        {
+            return buf[0] != 0;
         }
         return null;
     }
