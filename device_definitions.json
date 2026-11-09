@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "steelseries": {
+    "b0_pids": [
+      8718, 8722, 8726, 8758, 8706, 8710, 8714, 8792, 8754, 8787
+    ],
+    "descriptions": {
+      "8718": "Arctis 7+",
+      "8722": "Arctis 7P+",
+      "8726": "Arctis 7X+",
+      "8758": "Arctis 7+ Destiny",
+      "8706": "Arctis Nova 7",
+      "8710": "Arctis Nova 7P",
+      "8714": "Arctis Nova 7X",
+      "8792": "Arctis Nova 7 Dragon",
+      "8754": "Arctis Nova 5",
+      "8787": "Arctis Nova 5X"
+    }
+  },
+  "logitech": {
+    "supported_vids": [ 1133 ],
+    "hidpp_features": [ "0x1000", "0x1004" ]
+  }
+}
