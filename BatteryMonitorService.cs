@@ -63,6 +63,15 @@ public static class BatteryMonitorService
         0x2253  // Arctis Nova 5X
     };
 
+    // Arctis 7+ family reports battery on a 0..4 scale; Nova family reports 0..100 directly.
+    private static readonly HashSet<int> SteelSeriesFourStepPids = new()
+    {
+        0x220E, // Arctis 7+
+        0x2212, // Arctis 7P+
+        0x2216, // Arctis 7X+
+        0x2236  // Arctis 7+ Destiny
+    };
+
     public static List<BatteryDeviceInfo> PollAllDevices()
     {
         var result = new List<BatteryDeviceInfo>();
@@ -85,12 +94,21 @@ public static class BatteryMonitorService
         return result;
     }
 
+    private static bool IsUsbHidDevice(HidDevice device)
+    {
+        string path = device.DevicePath ?? "";
+        return !path.Contains("{00001812-", StringComparison.OrdinalIgnoreCase) &&
+               !path.Contains("{00001124-", StringComparison.OrdinalIgnoreCase) &&
+               !path.Contains("bthle", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static List<BatteryDeviceInfo> PollAllRazerDevices()
     {
         var list = new List<BatteryDeviceInfo>();
         try
         {
             var razerGroups = DeviceList.Local.GetHidDevices(0x1532)
+                .Where(IsUsbHidDevice)
                 .GroupBy(d => d.ProductID)
                 .ToList();
 
@@ -99,18 +117,22 @@ public static class BatteryMonitorService
                 try
                 {
                     int pid = group.Key;
-                    var target = group.FirstOrDefault(d => d.GetMaxFeatureReportLength() >= 90);
-                    if (target == null) continue;
+                    var candidates = group.Where(d => d.GetMaxFeatureReportLength() >= 90).ToList();
+                    if (candidates.Count == 0) continue;
 
-                    string friendlyName = GetFriendlyNameOrDefault(target, $"Razer Cihazı (0x{pid:X4})");
+                    string friendlyName = GetFriendlyNameOrDefault(candidates[0], $"Razer Cihazı (0x{pid:X4})");
                     DeviceType devType = GuessRazerDeviceType(friendlyName, group);
 
                     int? pct = null;
                     bool isCharging = false;
+                    bool dongleReportedOffline = false;
 
-                    using var handle = CreateFile(target.DevicePath, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
-                    if (!handle.IsInvalid)
+                    foreach (var target in candidates)
                     {
+                        using var handle = CreateFile(target.DevicePath, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                        if (handle.IsInvalid) continue;
+
+                        byte? matchedTxId = null;
                         foreach (byte txId in new byte[] { 0x1F, 0x3F, 0xFF })
                         {
                             byte[] req = new byte[91];
@@ -129,23 +151,30 @@ public static class BatteryMonitorService
                                 Thread.Sleep(40);
                                 byte[] resp = new byte[91];
                                 resp[0] = 0x00;
-                                if (HidD_GetFeature(handle, resp, resp.Length) && resp[1] == 0x02)
+                                if (HidD_GetFeature(handle, resp, resp.Length) &&
+                                    resp[1] == 0x02 &&
+                                    resp[7] == 0x07 &&
+                                    resp[8] == 0x80)
                                 {
                                     int rawVal = resp[10];
                                     if (rawVal > 0)
                                     {
                                         pct = Math.Clamp((int)Math.Round(rawVal * 100.0 / 255.0), 1, 100);
+                                        matchedTxId = txId;
                                         break;
                                     }
+
+                                    // Dongle responded with status 0x02 (OK) and battery 0x00 -> wireless device is turned OFF / asleep.
+                                    dongleReportedOffline = true;
                                 }
                             }
                         }
 
-                        // Also try querying charging status (0x84) if supported
+                        // Query charging status (0x84) using the same transaction ID that succeeded
                         if (pct.HasValue)
                         {
                             byte[] chgReq = new byte[91];
-                            chgReq[2] = 0x1F;
+                            chgReq[2] = matchedTxId ?? 0x1F;
                             chgReq[6] = 0x02;
                             chgReq[7] = 0x07;
                             chgReq[8] = 0x84; // Get Charging Status
@@ -162,16 +191,17 @@ public static class BatteryMonitorService
                                     isCharging = chgResp[10] == 1;
                                 }
                             }
+                            break;
                         }
                     }
 
-                    // Fallback to Razer Synapse 4 log for this PID
-                    if (!pct.HasValue)
+                    // Fallback to Razer Synapse 4 log ONLY if the dongle did not explicitly report the device as offline (0).
+                    if (!pct.HasValue && !dongleReportedOffline)
                     {
                         pct = ReadRazerBatteryFromLog(pid);
                     }
 
-                    if (pct.HasValue)
+                    if (pct.HasValue && pct.Value > 0)
                     {
                         list.Add(new BatteryDeviceInfo
                         {
@@ -214,9 +244,17 @@ public static class BatteryMonitorService
 
     private static DeviceType GuessRazerDeviceType(string name, IEnumerable<HidDevice> interfaces)
     {
+        if (name.Contains("Hammerhead", StringComparison.OrdinalIgnoreCase))
+        {
+            return DeviceType.Earbuds;
+        }
+
         if (name.Contains("Kraken", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("BlackShark", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Barracuda", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Kaira", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Nari", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Opus", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Headset", StringComparison.OrdinalIgnoreCase))
         {
             return DeviceType.Headset;
@@ -238,6 +276,7 @@ public static class BatteryMonitorService
         try
         {
             var ssGroups = DeviceList.Local.GetHidDevices(0x1038)
+                .Where(IsUsbHidDevice)
                 .GroupBy(d => d.ProductID)
                 .ToList();
 
@@ -280,7 +319,9 @@ public static class BatteryMonitorService
                                 if (state == 0x01)
                                     continue; // Headset is turned OFF
 
-                                int pct = rawBatt <= 4 ? Math.Clamp(rawBatt * 25, 0, 100) : Math.Clamp((int)rawBatt, 0, 100);
+                                int pct = (SteelSeriesFourStepPids.Contains(pid) && rawBatt <= 4)
+                                    ? Math.Clamp(rawBatt * 25, 0, 100)
+                                    : Math.Clamp((int)rawBatt, 0, 100);
                                 list.Add(new BatteryDeviceInfo
                                 {
                                     Id = $"ss_{pid:X4}",

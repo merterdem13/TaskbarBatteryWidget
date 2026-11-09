@@ -7,6 +7,11 @@ namespace TaskbarBatteryWidget;
 
 internal static class RazerLogReader
 {
+    private static readonly Regex LevelRegex = new(@"""level"":\s*(-?\d+)", RegexOptions.Compiled);
+    private static readonly Regex DisconnectedRegex = new(
+        @"""(?:isConnected|connected)"":\s*false|""(?:connectionState|state|powerState)"":\s*""(?:disconnected|off|offline)""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     public static int? ReadBattery(string directory, int productId, DateTime now)
     {
         if (!Directory.Exists(directory)) return null;
@@ -19,17 +24,31 @@ internal static class RazerLogReader
             try
             {
                 TimeSpan age = now - File.GetLastWriteTime(file);
-                if (age < TimeSpan.Zero || age > TimeSpan.FromMinutes(30)) continue;
+                if (age < TimeSpan.Zero || age > TimeSpan.FromMinutes(10)) continue;
 
                 using var stream = new FileStream(file, FileMode.Open, FileAccess.Read,
                     FileShare.ReadWrite | FileShare.Delete);
                 stream.Seek(Math.Max(0, stream.Length - 16384), SeekOrigin.Begin);
                 using var reader = new StreamReader(stream);
-                var matches = Regex.Matches(reader.ReadToEnd(), @"""level"":\s*(-?\d+)");
-                if (matches.Count > 0 &&
-                    int.TryParse(matches[^1].Groups[1].Value, out int percent) &&
-                    percent is >= 0 and <= 100)
-                    return percent;
+                string tail = reader.ReadToEnd();
+
+                var matches = LevelRegex.Matches(tail);
+                if (matches.Count == 0) continue;
+
+                Match lastMatch = matches[^1];
+                if (!int.TryParse(lastMatch.Groups[1].Value, out int percent))
+                    continue;
+
+                // In Razer Synapse logs, level <= 0 indicates the wireless device is turned off / disconnected.
+                if (percent is <= 0 or > 100)
+                    return null;
+
+                // If a disconnect/off event was logged after the last battery level entry, treat as offline.
+                string afterLastLevel = tail[(lastMatch.Index + lastMatch.Length)..];
+                if (DisconnectedRegex.IsMatch(afterLastLevel))
+                    return null;
+
+                return percent;
             }
             catch (Exception exception)
             {

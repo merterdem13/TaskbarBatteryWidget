@@ -34,12 +34,12 @@ public partial class MainWindow : Window
     private const int GWL_HWNDPARENT = -8;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int WM_DEVICECHANGE = 0x0219;
 
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOACTIVATE = 0x0010;
-    private const uint SWP_SHOWWINDOW = 0x0040;
 
     [DllImport("user32.dll")]
     private static extern int GetWindowLong(IntPtr hwnd, int index);
@@ -47,8 +47,16 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hwnd, int index, int newStyle);
 
+    [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+    private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
     private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    private static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong)
+        => IntPtr.Size == 8
+            ? SetWindowLongPtr64(hWnd, nIndex, dwNewLong)
+            : new IntPtr(SetWindowLong32(hWnd, nIndex, dwNewLong.ToInt32()));
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -76,10 +84,12 @@ public partial class MainWindow : Window
 
     private readonly DispatcherTimer _pollTimer;
     private readonly DispatcherTimer _taskbarSyncTimer;
+    private readonly DispatcherTimer _deviceChangeDebounceTimer;
     private readonly System.Windows.Forms.NotifyIcon _trayIcon;
     private readonly System.Windows.Forms.ToolStripMenuItem _lockTrayItem;
     private readonly System.Windows.Forms.ToolStripMenuItem _autoStartTrayItem;
     private bool _isPolling;
+    private bool _refreshQueued;
     private bool _customPositionLoaded;
     private bool _isPositionLocked = true;
     private bool _hasActiveDevices;
@@ -94,6 +104,13 @@ public partial class MainWindow : Window
     private const string RegistryRunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string AppRegistryName = "TaskbarBatteryWidget";
 
+    // Frozen Static Brushes
+    private static readonly Brush CyanBrush = CreateFrozenBrush(56, 189, 248);
+    private static readonly Brush RedBrush = CreateFrozenBrush(255, 77, 79);
+    private static readonly Brush YellowBrush = CreateFrozenBrush(250, 173, 20);
+    private static readonly Brush GreenBrush = CreateFrozenBrush(74, 222, 128);
+    private static readonly Brush OffWhiteBrush = CreateFrozenBrush(245, 245, 245);
+
     // Frozen Static Vector Geometries for Cross-Template Binding
     private static readonly Geometry MouseGeometry = CreateFrozenGeometry(
         "M12,2 C8.69,2 6,4.69 6,8 L6,16 C6,19.31 8.69,22 12,22 C15.31,22 18,19.31 18,16 L18,8 C18,4.69 15.31,2 12,2 Z M13,6 L13,10 L11,10 L11,6 L13,6 Z");
@@ -106,6 +123,13 @@ public partial class MainWindow : Window
 
     private static readonly Geometry PhoneGeometry = CreateFrozenGeometry(
         "M16,1 L8,1 C6.34,1 5,2.34 5,4 L5,20 C5,21.66 6.34,23 8,23 L16,23 C17.66,23 19,21.66 19,20 L19,4 C19,2.34 17.66,1 16,1 Z M13,21 L11,21 L11,20 L13,20 L13,21 Z M17,18 L7,18 L7,4 L17,4 L17,18 Z");
+
+    private static Brush CreateFrozenBrush(byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
+    }
 
     private static Geometry CreateFrozenGeometry(string pathData)
     {
@@ -165,6 +189,16 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(1)
         };
         _taskbarSyncTimer.Tick += (_, _) => SyncWithTaskbarState();
+
+        _deviceChangeDebounceTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(600)
+        };
+        _deviceChangeDebounceTimer.Tick += async (_, _) =>
+        {
+            _deviceChangeDebounceTimer.Stop();
+            await RefreshDevicesAsync();
+        };
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -172,6 +206,8 @@ public partial class MainWindow : Window
         var hwnd = new WindowInteropHelper(this).Handle;
         int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
         SetWindowLong(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+
+        HwndSource.FromHwnd(hwnd)?.AddHook(WndProc);
 
         AttachToTaskbar(hwnd);
         if (!TryLoadCustomPosition())
@@ -182,6 +218,17 @@ public partial class MainWindow : Window
         _taskbarSyncTimer.Start();
     }
 
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_DEVICECHANGE)
+        {
+            // Trigger a debounced poll whenever USB dongles or Bluetooth/HID devices change state
+            _deviceChangeDebounceTimer.Stop();
+            _deviceChangeDebounceTimer.Start();
+        }
+        return IntPtr.Zero;
+    }
+
     private void AttachToTaskbar(IntPtr hwnd)
     {
         IntPtr taskbarHwnd = FindWindow("Shell_TrayWnd", null);
@@ -189,7 +236,7 @@ public partial class MainWindow : Window
         {
             // Setting Shell_TrayWnd as owner docks the window z-order directly above the taskbar
             // and prevents Win+D (Show Desktop) from minimizing or hiding it!
-            SetWindowLongPtr64(hwnd, GWL_HWNDPARENT, taskbarHwnd);
+            SetWindowLongPtr(hwnd, GWL_HWNDPARENT, taskbarHwnd);
             _lastTaskbarHwnd = taskbarHwnd;
         }
     }
@@ -255,7 +302,7 @@ public partial class MainWindow : Window
             Top = position.Top;
             _customPositionLoaded = true;
             EnsureCustomPositionVisible();
-            return true;
+            return _customPositionLoaded;
         }
         catch (Exception exception)
         {
@@ -276,16 +323,28 @@ public partial class MainWindow : Window
         double width = Math.Max(32, ActualWidth);
         double height = Math.Max(24, ActualHeight);
         var widgetBounds = new Rect(Left * dpiX, Top * dpiY, width * dpiX, height * dpiY);
-        bool visible = System.Windows.Forms.Screen.AllScreens.Any(screen =>
+
+        var matchingScreen = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(screen =>
         {
-            var bounds = screen.Bounds;
-            return new Rect(bounds.X, bounds.Y, bounds.Width, bounds.Height).Contains(widgetBounds);
+            var b = screen.Bounds;
+            return new Rect(b.X, b.Y, b.Width, b.Height).IntersectsWith(widgetBounds);
         });
-        if (!visible)
+
+        if (matchingScreen == null)
         {
             _customPositionLoaded = false;
             SnapToTaskbarLeft();
+            return;
         }
+
+        var bounds = matchingScreen.Bounds;
+        double minLeft = bounds.Left / dpiX;
+        double maxLeft = Math.Max(minLeft, (bounds.Right / dpiX) - width);
+        double minTop = bounds.Top / dpiY;
+        double maxTop = Math.Max(minTop, (bounds.Bottom / dpiY) - height);
+
+        Left = Math.Clamp(Left, minLeft, maxLeft);
+        Top = Math.Clamp(Top, minTop, maxTop);
     }
 
     private void SaveCustomPosition()
@@ -305,62 +364,77 @@ public partial class MainWindow : Window
 
     private async Task RefreshDevicesAsync()
     {
-        if (_isPolling) return;
+        if (_isPolling)
+        {
+            _refreshQueued = true;
+            return;
+        }
+
         _isPolling = true;
 
         try
         {
-            var devices = await Task.Run(BatteryMonitorService.PollAllDevices);
-
-            if (devices.Count == 0)
+            do
             {
-                _hasActiveDevices = false;
-                _lastStateSignature = "";
-                MainBorder.Visibility = Visibility.Collapsed;
-                TrimWorkingSet();
-                return;
-            }
+                _refreshQueued = false;
+                var devices = await Task.Run(BatteryMonitorService.PollAllDevices);
 
-            _hasActiveDevices = true;
-            string currentSig = string.Join("|", devices.Select(d => $"{d.Id}:{d.Name}:{d.Type}:{d.BatteryPercent}:{d.IsCharging}:{d.StatusText}"));
-            if (currentSig != _lastStateSignature)
-            {
-                _lastStateSignature = currentSig;
-                var viewModels = new List<DeviceViewModel>();
-                foreach (var d in devices)
+                if (devices.Count == 0)
                 {
-                    var (accent, textBrush) = GetColorBrushes(d.BatteryPercent, d.IsCharging);
-                    double fillHeight = d.BatteryPercent.HasValue
-                        ? Math.Max(2.0, 13.0 * d.BatteryPercent.Value / 100.0)
-                        : 13.0;
-
-                    viewModels.Add(new DeviceViewModel
-                    {
-                        Name = d.Name,
-                        IconGeometry = GetIconForType(d.Type),
-                        DisplayText = d.StatusText,
-                        TooltipText = $"{d.Name} ({d.StatusText})",
-                        AccentBrush = accent,
-                        TextBrush = textBrush,
-                        BarVisibility = d.BatteryPercent.HasValue ? Visibility.Visible : Visibility.Collapsed,
-                        BarFillHeight = fillHeight
-                    });
+                    _hasActiveDevices = false;
+                    _lastStateSignature = "";
+                    DevicesItemsControl.ItemsSource = null;
+                    MainBorder.Visibility = Visibility.Collapsed;
+                    TrimWorkingSet();
+                    continue;
                 }
 
-                DevicesItemsControl.ItemsSource = viewModels;
-            }
+                _hasActiveDevices = true;
+                string currentSig = string.Join("|", devices.Select(d => $"{d.Id}:{d.Name}:{d.Type}:{d.BatteryPercent}:{d.IsCharging}:{d.StatusText}"));
+                if (currentSig != _lastStateSignature)
+                {
+                    _lastStateSignature = currentSig;
+                    var viewModels = new List<DeviceViewModel>();
+                    foreach (var d in devices)
+                    {
+                        var (accent, textBrush) = GetColorBrushes(d.BatteryPercent, d.IsCharging);
+                        double fillHeight = d.BatteryPercent.HasValue
+                            ? Math.Max(2.0, 13.0 * d.BatteryPercent.Value / 100.0)
+                            : 13.0;
 
-            if (!IsFullscreenAppActive())
-            {
-                MainBorder.Visibility = Visibility.Visible;
-            }
+                        viewModels.Add(new DeviceViewModel
+                        {
+                            Name = d.Name,
+                            IconGeometry = GetIconForType(d.Type),
+                            DisplayText = d.StatusText,
+                            TooltipText = $"{d.Name} ({d.StatusText})",
+                            AccentBrush = accent,
+                            TextBrush = textBrush,
+                            BarVisibility = d.BatteryPercent.HasValue ? Visibility.Visible : Visibility.Collapsed,
+                            BarFillHeight = fillHeight
+                        });
+                    }
 
-            if (!_customPositionLoaded)
-            {
-                await Dispatcher.InvokeAsync(SnapToTaskbarLeft, DispatcherPriority.Loaded);
-            }
+                    DevicesItemsControl.ItemsSource = viewModels;
+                }
 
-            TrimWorkingSet();
+                if (!IsFullscreenAppActive())
+                {
+                    MainBorder.Visibility = Visibility.Visible;
+                }
+
+                if (!_customPositionLoaded)
+                {
+                    await Dispatcher.InvokeAsync(SnapToTaskbarLeft, DispatcherPriority.Loaded);
+                }
+                else
+                {
+                    await Dispatcher.InvokeAsync(EnsureCustomPositionVisible, DispatcherPriority.Loaded);
+                }
+
+                TrimWorkingSet();
+            }
+            while (_refreshQueued);
         }
         catch (Exception exception)
         {
@@ -375,31 +449,15 @@ public partial class MainWindow : Window
     private static (Brush Accent, Brush Text) GetColorBrushes(int? pct, bool isCharging)
     {
         if (!pct.HasValue)
-        {
-            var cyan = new SolidColorBrush(Color.FromRgb(56, 189, 248));
-            cyan.Freeze();
-            return (cyan, Brushes.White);
-        }
+            return (CyanBrush, Brushes.White);
 
         if (pct.Value <= 20)
-        {
-            var red = new SolidColorBrush(Color.FromRgb(255, 77, 79));
-            red.Freeze();
-            return (red, red);
-        }
+            return (RedBrush, RedBrush);
 
         if (pct.Value <= 45)
-        {
-            var yellow = new SolidColorBrush(Color.FromRgb(250, 173, 20));
-            yellow.Freeze();
-            return (yellow, yellow);
-        }
+            return (YellowBrush, YellowBrush);
 
-        var green = new SolidColorBrush(Color.FromRgb(74, 222, 128));
-        green.Freeze();
-        var white = new SolidColorBrush(Color.FromRgb(245, 245, 245));
-        white.Freeze();
-        return (green, white);
+        return (GreenBrush, OffWhiteBrush);
     }
 
     private static Geometry GetIconForType(DeviceType type) => type switch
@@ -424,15 +482,22 @@ public partial class MainWindow : Window
         if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "XamlExplorerHostIslandWindow")
             return false;
 
-        var screen = System.Windows.Forms.Screen.PrimaryScreen;
-        if (screen != null && GetWindowRect(fg, out RECT r))
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var widgetScreen = hwnd != IntPtr.Zero
+            ? System.Windows.Forms.Screen.FromHandle(hwnd)
+            : System.Windows.Forms.Screen.PrimaryScreen;
+        var fgScreen = System.Windows.Forms.Screen.FromHandle(fg);
+
+        if (widgetScreen != null &&
+            fgScreen != null &&
+            widgetScreen.DeviceName == fgScreen.DeviceName &&
+            GetWindowRect(fg, out RECT r))
         {
-            int w = r.Right - r.Left;
-            int h = r.Bottom - r.Top;
-            if (r.Left <= 0 && r.Top <= 0 && w >= screen.Bounds.Width && h >= screen.Bounds.Height)
-            {
-                return true;
-            }
+            var b = widgetScreen.Bounds;
+            return r.Left <= b.Left &&
+                   r.Top <= b.Top &&
+                   r.Right >= b.Right &&
+                   r.Bottom >= b.Bottom;
         }
         return false;
     }

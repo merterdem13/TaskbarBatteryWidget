@@ -33,6 +33,13 @@ try
     Check(new BatteryDeviceInfo { BatteryPercent = 50, IsCharging = true }.StatusText == "⚡%50",
         "Doğrulanmış şarj yüzdesinin gösterimi korunur");
 
+    Check(NativeBluetoothBatteryReader.CleanDeviceName("AirPods Pro Hands-Free AG Audio") == "AirPods Pro",
+        "Hands-Free AG Audio soneki temizlenir");
+    Check(NativeBluetoothBatteryReader.CleanDeviceName("Razer Opus Stereo") == "Razer Opus",
+        "Sondaki Stereo soneki temizlenir");
+    Check(NativeBluetoothBatteryReader.CleanDeviceName("Xbox Wireless Stereo Headset") == "Xbox Wireless Stereo Headset",
+        "Cihaz adının ortasındaki Stereo kelimesi bozulmaz");
+
     const int productId = 1234;
     DateTime now = DateTime.Now;
     string otherProductLog = Path.Combine(directory, "products_5678_mw.log");
@@ -42,7 +49,9 @@ try
         "Başka Razer ürününün logu kullanılmaz");
 
     string matchingLog = Path.Combine(directory, "products_1234_mw.log");
-    foreach (var sample in new[] { (Text: "{\"level\":55}\n{\"level\":0}", Expected: (int?)0),
+    foreach (var sample in new[] { (Text: "{\"level\":55}\n{\"level\":0}", Expected: (int?)null),
+                                  (Text: "{\"level\":75}\n{\"isConnected\":false}", Expected: (int?)null),
+                                  (Text: "{\"level\":80}\n{\"state\":\"disconnected\"}", Expected: (int?)null),
                                   (Text: "{\"level\":100}", Expected: (int?)100),
                                   (Text: "{\"level\":101}", Expected: (int?)null),
                                   (Text: "{\"level\":50}\n{\"level\":-1}", Expected: (int?)null),
@@ -54,7 +63,7 @@ try
             $"Razer log değeri doğrulanır: {sample.Text.Replace('\n', ' ')}");
     }
     File.WriteAllText(matchingLog, "{\"level\":80}");
-    File.SetLastWriteTime(matchingLog, now.AddMinutes(-31));
+    File.SetLastWriteTime(matchingLog, now.AddMinutes(-15));
     Check(RazerLogReader.ReadBattery(directory, productId, now) == null, "Eski Razer logu kullanılmaz");
     File.SetLastWriteTime(matchingLog, now.AddMinutes(5));
     Check(RazerLogReader.ReadBattery(directory, productId, now) == null, "Gelecek tarihli Razer logu kullanılmaz");
