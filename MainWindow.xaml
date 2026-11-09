@@ -14,7 +14,7 @@
     <Window.ContextMenu>
         <ContextMenu>
             <MenuItem Header="Şimdi Yenile" Click="RefreshMenuItem_Click" />
-            <MenuItem x:Name="LockPositionMenuItem" Header="Konumu Sabitle (Kilitli)" IsCheckable="True" IsChecked="True" Click="LockPositionMenuItem_Click" />
+            <MenuItem x:Name="LockPositionMenuItem" Header="Konumu Sabitle" IsCheckable="True" IsChecked="True" Click="LockPositionMenuItem_Click" />
             <MenuItem Header="Konumu Sıfırla (Sol Alt)" Click="ResetPositionMenuItem_Click" />
             <Separator />
             <MenuItem x:Name="AutoStartMenuItem" Header="Windows ile Başlat" IsCheckable="True" Click="AutoStartMenuItem_Click" />

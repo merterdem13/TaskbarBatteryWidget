@@ -109,7 +109,7 @@ public static class NativeBluetoothBatteryReader
                     index++;
 
                     byte? batt = GetByteProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Battery);
-                    if (batt == null || batt.Value == 0 || batt.Value > 100)
+                    if (batt == null || batt.Value > 100)
                         continue;
 
                     // Check if actively connected (if property exists and is false, skip)
@@ -199,9 +199,9 @@ public static class NativeBluetoothBatteryReader
                     name.Contains("Apple Mobile Device", StringComparison.OrdinalIgnoreCase) ||
                     instanceId.Contains("PID_12A", StringComparison.OrdinalIgnoreCase))
                 {
-                    byte? batt = GetByteProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Battery);
+                    // USB presence alone does not expose Apple's battery or charging state.
                     string displayName = name.Contains("Apple Mobile Device", StringComparison.OrdinalIgnoreCase) ? "iPhone" : name;
-                    return (displayName, batt.HasValue && batt.Value <= 100 ? (int)batt.Value : null);
+                    return (displayName, null);
                 }
             }
         }
