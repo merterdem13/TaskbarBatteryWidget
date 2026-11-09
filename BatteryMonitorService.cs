@@ -380,10 +380,20 @@ public static class BatteryMonitorService
                 if (alreadyFound.Any(d => d.Name.Equals(bt.Name, StringComparison.OrdinalIgnoreCase)))
                     continue;
 
+                string displayName = GetBluetoothDisplayName(bt);
+                string deviceId = bt.AirPodsPart == AirPodsPart.None
+                    ? "bt_" + bt.Name
+                    : "bt_airpods_" + NativeBluetoothBatteryReader.RemoveAirPodsPartMarker(bt.Name)
+                        .Replace(" ", "_", StringComparison.Ordinal)
+                        + "_" + bt.AirPodsPart;
+
+                if (list.Any(d => d.Id.Equals(deviceId, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
                 list.Add(new BatteryDeviceInfo
                 {
-                    Id = "bt_" + bt.Name,
-                    Name = bt.Name,
+                    Id = deviceId,
+                    Name = displayName,
                     Type = bt.Type,
                     BatteryPercent = bt.BatteryPercent,
                     IsCharging = false
@@ -395,6 +405,22 @@ public static class BatteryMonitorService
             DiagnosticLog.Write("Cihaz tarama", exception);
         }
         return list;
+    }
+
+    private static string GetBluetoothDisplayName(BluetoothBatteryInfo device)
+    {
+        if (device.AirPodsPart == AirPodsPart.None)
+            return device.Name;
+
+        string familyName = NativeBluetoothBatteryReader.RemoveAirPodsPartMarker(device.Name);
+        string partName = device.AirPodsPart switch
+        {
+            AirPodsPart.Case => "Kutu",
+            AirPodsPart.Left => "Sol",
+            AirPodsPart.Right => "Sağ",
+            _ => ""
+        };
+        return $"{familyName} {partName}".Trim();
     }
 
     private static BatteryDeviceInfo? PollIPhoneUsb()
