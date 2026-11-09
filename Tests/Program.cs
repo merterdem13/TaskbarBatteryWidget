@@ -39,6 +39,35 @@ try
         "Sondaki Stereo soneki temizlenir");
     Check(NativeBluetoothBatteryReader.CleanDeviceName("Xbox Wireless Stereo Headset") == "Xbox Wireless Stereo Headset",
         "Cihaz adının ortasındaki Stereo kelimesi bozulmaz");
+    Check(NativeBluetoothBatteryReader.ParseAirPodsPart("AirPods Pro Charging Case", "") == AirPodsPart.Case,
+        "AirPods kutusu parçası tanınır");
+    Check(NativeBluetoothBatteryReader.ParseAirPodsPart("AirPods Pro", "BTHLE\\Dev_AirPods_Left") == AirPodsPart.Left,
+        "AirPods sol parçası tanınır");
+    Check(NativeBluetoothBatteryReader.ParseAirPodsPart("AirPods Pro Right", "") == AirPodsPart.Right,
+        "AirPods sağ parçası tanınır");
+    Check(NativeBluetoothBatteryReader.RemoveAirPodsPartMarker("AirPods Pro Left") == "AirPods Pro",
+        "AirPods parça eki görünen addan temizlenir");
+    Check(NativeBluetoothBatteryReader.NormalizeAirPodsName(
+            "AAP Server", "Mert's AirPods") == "Mert's AirPods",
+        "AirPods servis profili ana cihaz adına normalize edilir");
+    Check(NativeBluetoothBatteryReader.NormalizeAirPodsName(
+            "Mert's AirPods Hands-Free", "Mert's AirPods") == "Mert's AirPods",
+        "AirPods Hands-Free profili ana cihaz adına normalize edilir");
+    var airPodsParts = NativeBluetoothBatteryReader.CollapseAirPodsCandidates(new List<BluetoothBatteryInfo>
+    {
+        new() { Name = "AirPods Pro Left", BatteryPercent = 81, AirPodsPart = AirPodsPart.Left },
+        new() { Name = "AirPods Pro Right", BatteryPercent = 79, AirPodsPart = AirPodsPart.Right },
+        new() { Name = "AirPods Pro Charging Case", BatteryPercent = 62, AirPodsPart = AirPodsPart.Case }
+    });
+    Check(airPodsParts.Count == 3 &&
+          airPodsParts.Any(part => part.AirPodsPart == AirPodsPart.Left && part.BatteryPercent == 81) &&
+          airPodsParts.Any(part => part.AirPodsPart == AirPodsPart.Right && part.BatteryPercent == 79) &&
+          airPodsParts.Any(part => part.AirPodsPart == AirPodsPart.Case && part.BatteryPercent == 62),
+        "AirPods sol, sağ ve kutu yüzdeleri ayrı korunur");
+    Check(NativeBluetoothBatteryReader.CollapseAirPodsCandidates(new List<BluetoothBatteryInfo>
+    {
+        new() { Name = "AirPods Pro", BatteryPercent = 70, AirPodsPart = AirPodsPart.None }
+    }).Count == 1, "Parça bilgisi yoksa genel AirPods kaydı korunur");
     Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("iPhone Mert") == DeviceType.Phone,
         "Bluetooth iPhone telefon olarak sınıflandırılır");
     Check(NativeBluetoothBatteryReader.GuessGenericDeviceTypeForTest("Galaxy S24") == DeviceType.Phone,

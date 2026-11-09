@@ -1,13 +1,31 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Linq;
+using System.Text.RegularExpressions;
 using Netimobiledevice;
 using Netimobiledevice.Lockdown;
 using Netimobiledevice.Usbmuxd;
 
 namespace TaskbarBatteryWidget;
+
+public enum AirPodsPart
+{
+    None,
+    Case,
+    Left,
+    Right
+}
+
+public sealed class BluetoothBatteryInfo
+{
+    public string Name { get; init; } = "";
+    public string InstanceId { get; init; } = "";
+    public int? BatteryPercent { get; init; }
+    public DeviceType Type { get; init; }
+    public AirPodsPart AirPodsPart { get; init; }
+}
 
 public static class NativeBluetoothBatteryReader
 {
@@ -108,10 +126,33 @@ public static class NativeBluetoothBatteryReader
         ref uint PropertyBufferSize,
         uint ulFlags);
 
-    public static List<(string Name, int BatteryPercent, DeviceType Type)> GetConnectedBluetoothBatteries()
+    [DllImport("cfgmgr32.dll", SetLastError = false, CharSet = CharSet.Unicode)]
+    private static extern int CM_Get_Device_ID_List_SizeW(
+        out uint pulLen,
+        string? pszFilter,
+        uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", SetLastError = false, CharSet = CharSet.Unicode)]
+    private static extern int CM_Get_Device_ID_ListW(
+        string? pszFilter,
+        [Out] char[] buffer,
+        uint bufferLen,
+        uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", SetLastError = false, CharSet = CharSet.Unicode)]
+    private static extern int CM_Locate_DevNodeW(
+        out uint pdnDevInst,
+        string pDeviceID,
+        uint ulFlags);
+
+    public static List<BluetoothBatteryInfo> GetConnectedBluetoothBatteries()
     {
-        var results = new List<(string Name, int BatteryPercent, DeviceType Type)>();
-        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var cfgMgrCandidates = ReadBluetoothBatteryDevNodes();
+        if (cfgMgrCandidates.Count > 0)
+            return CollapseAirPodsCandidates(cfgMgrCandidates);
+
+        var candidates = new List<BluetoothBatteryInfo>();
+        var seenNodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (string enumName in new[] { "BTHENUM", "BTHLE", "HID" })
         {
@@ -128,32 +169,52 @@ public static class NativeBluetoothBatteryReader
                 {
                     index++;
 
+                    string instanceId = GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_InstanceId) ?? "";
+                    string? name = GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_FriendlyName)
+                                ?? GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_DeviceDesc);
+                    string ancestorName = GetBluetoothAncestorName(devData.DevInst);
+                    bool isAirPods = IsAirPodsInstance(instanceId, name, ancestorName);
                     byte? batt = GetByteProperty(hDevInfo, ref devData, DEVPKEY_Bluetooth_Battery);
-                    if (batt == null || batt.Value == 0 || batt.Value > 100)
+                    if (batt != null && (batt.Value == 0 || batt.Value > 100))
                         continue;
 
                     // Verify active connection on this node or its parent Bluetooth device node.
                     // Child HID/GATT nodes often omit DEVPKEY_Bluetooth_Connected while their parent
                     // BTHLE/BTHENUM node explicitly reports false when turned off or disconnected.
-                    if (!IsBluetoothDeviceActivelyConnected(hDevInfo, ref devData))
+                    if (!IsBluetoothDeviceActivelyConnected(hDevInfo, ref devData) && !isAirPods)
                         continue;
 
-                    string? name = GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_FriendlyName)
-                                ?? GetStringProperty(hDevInfo, ref devData, DEVPKEY_Device_DeviceDesc);
+                    name ??= string.IsNullOrWhiteSpace(ancestorName)
+                        ? (isAirPods ? "AirPods" : null)
+                        : ancestorName;
 
                     if (string.IsNullOrWhiteSpace(name))
                         continue;
 
                     name = CleanDeviceName(name);
+                    if (isAirPods)
+                        name = NormalizeAirPodsName(name, ancestorName);
                     if (string.IsNullOrWhiteSpace(name))
                         continue;
 
                     DeviceType type = GuessGenericDeviceType(name);
+                    if (batt == null && !isAirPods)
+                        continue;
+                    AirPodsPart airPodsPart = ParseAirPodsPart(name, instanceId);
+                    string dedupKey = airPodsPart == AirPodsPart.None
+                        ? name
+                        : $"{RemoveAirPodsPartMarker(name)}|{airPodsPart}";
 
-                    if (!seenNames.Contains(name))
+                    if (seenNodes.Add(dedupKey))
                     {
-                        seenNames.Add(name);
-                        results.Add((name, batt.Value, type));
+                        candidates.Add(new BluetoothBatteryInfo
+                        {
+                            Name = name,
+                            InstanceId = instanceId,
+                            BatteryPercent = batt,
+                            Type = type,
+                            AirPodsPart = airPodsPart
+                        });
                     }
                 }
             }
@@ -163,8 +224,220 @@ public static class NativeBluetoothBatteryReader
             }
         }
 
-        return results;
+        return CollapseAirPodsCandidates(candidates);
     }
+
+    private static List<BluetoothBatteryInfo> ReadBluetoothBatteryDevNodes()
+    {
+        const uint filterEnumerator = 0x00000001;
+        const uint filterPresent = 0x00000100;
+        var byAddress = new Dictionary<string, BluetoothBatteryInfo>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string enumerator in new[] { "BTHENUM", "BTHLE" })
+        {
+            if (CM_Get_Device_ID_List_SizeW(out uint size, enumerator, filterEnumerator | filterPresent) != CR_SUCCESS ||
+                size <= 1)
+                continue;
+
+            var buffer = new char[size];
+            if (CM_Get_Device_ID_ListW(enumerator, buffer, size, filterEnumerator | filterPresent) != CR_SUCCESS)
+                continue;
+
+            foreach (string instanceId in new string(buffer).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string? address = ExtractBluetoothAddress(instanceId);
+                if (address == null || CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS)
+                    continue;
+
+                int? battery = GetDevInstByteProperty(devInst, DEVPKEY_Bluetooth_Battery);
+                if (!battery.HasValue || battery is < 0 or > 100)
+                    continue;
+
+                string name = GetDevInstStringProperty(devInst, DEVPKEY_Device_FriendlyName)
+                           ?? GetDevInstStringProperty(devInst, DEVPKEY_Device_DeviceDesc)
+                           ?? "";
+                string ancestorName = GetBluetoothAncestorName(devInst);
+                bool isAirPods = IsAirPodsInstance(instanceId, name, ancestorName);
+                if (string.IsNullOrWhiteSpace(name) && !isAirPods)
+                    continue;
+
+                name = CleanDeviceName(string.IsNullOrWhiteSpace(name) ? ancestorName : name);
+                if (isAirPods)
+                    name = NormalizeAirPodsName(name, ancestorName);
+
+                AirPodsPart part = ParseAirPodsPart(name, instanceId);
+                string key = $"{address}|{part}";
+                if (!byAddress.TryGetValue(key, out BluetoothBatteryInfo? current) ||
+                    (!current.BatteryPercent.HasValue && battery.HasValue))
+                {
+                    byAddress[key] = new BluetoothBatteryInfo
+                    {
+                        Name = name,
+                        InstanceId = instanceId,
+                        BatteryPercent = battery,
+                        Type = GuessGenericDeviceType(name),
+                        AirPodsPart = part
+                    };
+                }
+            }
+        }
+
+        return byAddress.Values.ToList();
+    }
+
+    private static int? GetDevInstByteProperty(uint devInst, DEVPROPKEY key)
+    {
+        byte[] buffer = new byte[4];
+        uint size = (uint)buffer.Length;
+        int result = CM_Get_DevNode_PropertyW(devInst, ref key, out uint propertyType, buffer, ref size, 0);
+        if (result != CR_SUCCESS || size == 0)
+            return null;
+
+        return propertyType switch
+        {
+            0x03 when size >= 1 => buffer[0],
+            0x08 when size >= 4 => BitConverter.ToInt32(buffer, 0),
+            _ => null
+        };
+    }
+
+    private static string? ExtractBluetoothAddress(string instanceId)
+    {
+        Match match = Regex.Match(
+            instanceId,
+            @"(?:DEV_|&)([0-9A-F]{12})(?:_C|\\|$)",
+            RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value.ToUpperInvariant() : null;
+    }
+
+    internal static AirPodsPart ParseAirPodsPart(string name, string instanceId)
+    {
+        if (!IsAirPodsName(name))
+            return AirPodsPart.None;
+
+        string value = $"{name} {instanceId}";
+        if (ContainsAny(value, "charging case", "charge case", "case", "kutu"))
+            return AirPodsPart.Case;
+        if (ContainsAny(value, "left", " sol", "_l", "-l", "\\l"))
+            return AirPodsPart.Left;
+        if (ContainsAny(value, "right", " sağ", " sag", "_r", "-r", "\\r"))
+            return AirPodsPart.Right;
+        return AirPodsPart.None;
+    }
+
+    internal static string RemoveAirPodsPartMarker(string name)
+    {
+        string result = name;
+        foreach (string marker in new[]
+        {
+            "Charging Case", "Charge Case", "(Left)", "(Right)", "(Sol)", "(Sağ)", "(Sag)",
+            "Case", "Kutu", "Left", "Right", "Sol", "Sağ", "Sag"
+        })
+        {
+            result = result.Replace(marker, "", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return string.Join(" ", result.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Trim()
+            .TrimEnd('-', '_', ':')
+            .Trim();
+    }
+
+    internal static string NormalizeAirPodsName(string name, string ancestorName)
+    {
+        string normalized = IsAirPodsName(name) ? name : ancestorName;
+        if (IsAirPodsName(normalized))
+        {
+            foreach (string suffix in new[]
+            {
+                " Hands-Free AG Audio", " Hands-Free AG", " Hands-Free",
+                " Avrcp Transport", " AVRCP Transport", " AAP Server",
+                " Hizmet Bulma Hizmeti", " Service"
+            })
+            {
+                normalized = normalized.Replace(suffix, "", StringComparison.OrdinalIgnoreCase);
+            }
+
+            return string.Join(" ", normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries)).Trim();
+        }
+
+        return "AirPods";
+    }
+
+    internal static List<BluetoothBatteryInfo> CollapseAirPodsCandidates(List<BluetoothBatteryInfo> candidates)
+    {
+        var explicitAirPods = candidates
+            .Where(candidate => candidate.AirPodsPart != AirPodsPart.None)
+            .GroupBy(candidate => RemoveAirPodsPartMarker(candidate.Name), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (explicitAirPods.Count == 0)
+        {
+            return candidates
+                .Where(candidate => !IsAirPodsName(candidate.Name))
+                .Concat(candidates
+                    .Where(candidate => IsAirPodsName(candidate.Name))
+                    .GroupBy(candidate => RemoveAirPodsPartMarker(candidate.Name), StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group
+                        .OrderByDescending(candidate => candidate.BatteryPercent.HasValue)
+                        .First()))
+                .ToList();
+        }
+
+        var explicitNames = new HashSet<string>(
+            explicitAirPods.Select(group => group.Key),
+            StringComparer.OrdinalIgnoreCase);
+        var result = candidates
+            .Where(candidate =>
+                candidate.AirPodsPart == AirPodsPart.None &&
+                explicitNames.Contains(RemoveAirPodsPartMarker(candidate.Name)) == false)
+            .ToList();
+
+        foreach (var group in explicitAirPods)
+        {
+            foreach (var part in group
+                .GroupBy(candidate => candidate.AirPodsPart)
+                .Select(partGroup => partGroup.First()))
+            {
+                result.Add(part);
+            }
+        }
+
+        return result;
+    }
+
+    private static bool IsAirPodsName(string name) =>
+        name.Contains("AirPods", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAirPodsInstance(string instanceId, string? name, string ancestorName)
+    {
+        return (name?.Contains("AirPods", StringComparison.OrdinalIgnoreCase) ?? false) ||
+               ancestorName.Contains("AirPods", StringComparison.OrdinalIgnoreCase) ||
+               instanceId.Contains("VID&02068E_PID&009D", StringComparison.OrdinalIgnoreCase) ||
+               instanceId.Contains("VID&0001004C_PID&2013", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetBluetoothAncestorName(uint devInst)
+    {
+        uint currentInst = devInst;
+        for (int depth = 0; depth < 6; depth++)
+        {
+            if (CM_Get_Parent(out uint parentInst, currentInst, 0) != CR_SUCCESS || parentInst == 0)
+                break;
+
+            string? parentName = GetDevInstStringProperty(parentInst, DEVPKEY_Device_FriendlyName)
+                             ?? GetDevInstStringProperty(parentInst, DEVPKEY_Device_DeviceDesc);
+            if (!string.IsNullOrWhiteSpace(parentName))
+                return CleanDeviceName(parentName);
+
+            currentInst = parentInst;
+        }
+
+        return "";
+    }
+
+    private static bool ContainsAny(string value, params string[] terms) =>
+        terms.Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
 
     private static bool IsBluetoothDeviceActivelyConnected(IntPtr hDevInfo, ref SP_DEVINFO_DATA devData)
     {
@@ -365,6 +638,19 @@ public static class NativeBluetoothBatteryReader
         {
             return buf[0] != 0;
         }
+        return null;
+    }
+
+    private static string? GetDevInstStringProperty(uint devInst, DEVPROPKEY key)
+    {
+        byte[] buffer = new byte[512];
+        uint size = (uint)buffer.Length;
+        if (CM_Get_DevNode_PropertyW(devInst, ref key, out _, buffer, ref size, 0) == CR_SUCCESS &&
+            size > 2)
+        {
+            return Encoding.Unicode.GetString(buffer, 0, (int)size - 2);
+        }
+
         return null;
     }
 
