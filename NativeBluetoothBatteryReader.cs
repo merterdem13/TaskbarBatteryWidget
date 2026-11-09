@@ -2,6 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Linq;
+using Netimobiledevice;
+using Netimobiledevice.Lockdown;
+using Netimobiledevice.Usbmuxd;
 
 namespace TaskbarBatteryWidget;
 
@@ -195,6 +199,8 @@ public static class NativeBluetoothBatteryReader
         return cleaned;
     }
 
+    internal static DeviceType GuessGenericDeviceTypeForTest(string name) => GuessGenericDeviceType(name);
+
     private static DeviceType GuessGenericDeviceType(string name)
     {
         if (name.Contains("Mouse", StringComparison.OrdinalIgnoreCase) ||
@@ -220,10 +226,31 @@ public static class NativeBluetoothBatteryReader
             return DeviceType.Earbuds;
         }
 
+        if (name.Contains("iPhone", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("iPad", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("iPod", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Android", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Galaxy", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Pixel", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Xperia", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("OnePlus", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Huawei", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Redmi", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("POCO", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("OPPO", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("vivo", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Nokia", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Motorola", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Moto ", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("SM-", StringComparison.OrdinalIgnoreCase))
+        {
+            return DeviceType.Phone;
+        }
+
         return DeviceType.Headset;
     }
 
-    public static (string Name, int? BatteryPercent)? GetConnectedIPhoneInfo()
+    public static (string Name, int? BatteryPercent, bool IsCharging)? GetConnectedIPhoneInfo()
     {
         IntPtr hDevInfo = SetupDiGetClassDevs(IntPtr.Zero, "USB", IntPtr.Zero, DIGCF_PRESENT | DIGCF_ALLCLASSES);
         if (hDevInfo == IntPtr.Zero || hDevInfo == new IntPtr(-1))
@@ -252,9 +279,9 @@ public static class NativeBluetoothBatteryReader
                     name.Contains("Apple Mobile Device", StringComparison.OrdinalIgnoreCase) ||
                     instanceId.Contains("PID_12A", StringComparison.OrdinalIgnoreCase))
                 {
-                    // USB presence alone does not expose Apple's battery or charging state.
                     string displayName = name.Contains("Apple Mobile Device", StringComparison.OrdinalIgnoreCase) ? "iPhone" : name;
-                    return (displayName, null);
+                    var battery = TryReadIPhoneBattery();
+                    return (displayName, battery?.BatteryPercent, battery?.IsCharging == true);
                 }
             }
         }
@@ -264,6 +291,48 @@ public static class NativeBluetoothBatteryReader
         }
 
         return null;
+    }
+
+    private static (int BatteryPercent, bool IsCharging)? TryReadIPhoneBattery()
+    {
+        try
+        {
+            foreach (var device in Usbmux.GetDeviceList().Where(d => d.ConnectionType == UsbmuxdConnectionType.Usb))
+            {
+                try
+                {
+                    using var lockdown = MobileDevice.CreateUsingUsbmux(device.Serial, autopair: false);
+                    int? percent = ReadBatteryInteger(lockdown, "BatteryCurrentCapacity");
+                    bool? charging = ReadBatteryBoolean(lockdown, "BatteryIsCharging");
+                    if (percent.HasValue && percent.Value is >= 0 and <= 100)
+                        return (percent.Value, charging == true);
+                }
+                catch (Exception exception)
+                {
+                    // A device can be present but not trusted yet; keep the USB presence result.
+                    DiagnosticLog.Write("iPhone pil bilgisi", exception);
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            // Apple Devices/iTunes or usbmuxd may not be installed or running.
+            DiagnosticLog.Write("iPhone usbmux bağlantısı", exception);
+        }
+
+        return null;
+    }
+
+    private static int? ReadBatteryInteger(UsbmuxLockdownClient lockdown, string key)
+    {
+        var value = lockdown.GetValue("com.apple.mobile.battery", key)?.AsIntegerNode();
+        return value == null ? null : (int)value.Value;
+    }
+
+    private static bool? ReadBatteryBoolean(UsbmuxLockdownClient lockdown, string key)
+    {
+        var value = lockdown.GetValue("com.apple.mobile.battery", key)?.AsBooleanNode();
+        return value?.Value;
     }
 
     private static byte? GetByteProperty(IntPtr hDevInfo, ref SP_DEVINFO_DATA devData, DEVPROPKEY key)
